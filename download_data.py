@@ -1,27 +1,25 @@
 import ee
 import os
 import geemap
-import rasterio
-from rasterio.transform import from_origin
-import numpy as np
-import geopandas as gpd
-from datetime import datetime
+import datetime
 import time
 
 # Khởi tạo Earth Engine API
 ee.Initialize(project='ee-bonglantrungmuoi')
+
 # Thư mục dự án
-project_dir = "D:/HaiDang/Biomass/GiaLai-Biomass"  # Đường dẫn thực tế của người dùng
+project_dir = "D:/HaiDang/Biomass/GiaLai-Biomass"
 data_dir = os.path.join(project_dir, "Data")
 os.makedirs(data_dir, exist_ok=True)
-os.makedirs(os.path.join(data_dir, "sentinel"), exist_ok=True)
-os.makedirs(os.path.join(data_dir, "dem"), exist_ok=True)
-os.makedirs(os.path.join(data_dir, "gedi"), exist_ok=True)
-os.makedirs(os.path.join(data_dir, "vector"), exist_ok=True)
 
 print("="*80)
-print("SCRIPT TẢI DỮ LIỆU TỪ GEE CHO DỰ ÁN SINH KHỐI GIA LAI")
+print("SCRIPT EXPORT DỮ LIỆU TỪ GEE CHO DỰ ÁN SINH KHỐI GIA LAI")
 print("="*80)
+
+# Tạo tên thư mục dựa trên thời gian
+current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+folder_name = f"GiaLai_Biomass_{current_time}"
+print(f"Dữ liệu sẽ được export vào Google Drive trong thư mục: {folder_name}")
 
 # Khoảng thời gian nghiên cứu
 start_date = ee.Date.fromYMD(2022, 10, 10)
@@ -29,46 +27,9 @@ end_date = ee.Date.fromYMD(2023, 10, 10)
 
 # 1. Sử dụng shapefile Gia Lai có sẵn
 print("\n[1/4] Đang đọc shapefile Gia Lai...")
-# Đường dẫn đến shapefile (điều chỉnh nếu cần)
-shapefile_path = os.path.join(project_dir, "shapefile", "gia_lai.shp")
-# Kiểm tra nếu đường dẫn không đúng, thử các vị trí khác
-if not os.path.exists(shapefile_path):
-    potential_paths = [
-        os.path.join(project_dir, "gia_lai.shp"),
-        os.path.join(project_dir, "vector", "gia_lai.shp"),
-        os.path.join(project_dir, "boundary", "gia_lai.shp"),
-        os.path.join(project_dir, "shapefile", "gia_lai.shp")
-    ]
-    for path in potential_paths:
-        if os.path.exists(path):
-            shapefile_path = path
-            break
-
-# Đọc shapefile
-try:
-    gdf = gpd.read_file(shapefile_path)
-    print(f"  Đã đọc shapefile từ: {shapefile_path}")
-    
-    # Chuyển đổi geodataframe thành geometry cho Earth Engine
-    geometry = geemap.gdf_to_ee(gdf)
-    
-    # Lấy bbox cho khu vực (sẽ dùng cho tải dữ liệu)
-    bbox = geometry.geometry().bounds().getInfo()['coordinates'][0]
-    min_lon = min(point[0] for point in bbox)
-    max_lon = max(point[0] for point in bbox)
-    min_lat = min(point[1] for point in bbox)
-    max_lat = max(point[1] for point in bbox)
-    print(f"  Ranh giới khu vực: {min_lon}, {min_lat}, {max_lon}, {max_lat}")
-except Exception as e:
-    print(f"  Lỗi khi đọc shapefile: {str(e)}")
-    print("  Đang sử dụng ranh giới Gia Lai từ GEE...")
-    # Sử dụng ranh giới từ GEE nếu không đọc được shapefile
-    geometry = ee.FeatureCollection("projects/ee-bonglantrungmuoi/assets/gia_lai")
-    bbox = geometry.geometry().bounds().getInfo()['coordinates'][0]
-    min_lon = min(point[0] for point in bbox)
-    max_lon = max(point[0] for point in bbox)
-    min_lat = min(point[1] for point in bbox)
-    max_lat = max(point[1] for point in bbox)
+# Sử dụng ranh giới từ Earth Engine
+geometry = ee.FeatureCollection("projects/ee-bonglantrungmuoi/assets/gia_lai")
+print("  Đã tải ranh giới Gia Lai từ Earth Engine")
 
 # 2. Tải dữ liệu Sentinel-2
 print("\n[2/4] Đang xử lý dữ liệu Sentinel-2...")
@@ -107,172 +68,59 @@ def addIndices(image):
 s2Processed = filteredS2WithCs.map(maskLowQA).select('B.*').map(scaleBands).map(addIndices)
 s2Composite = s2Processed.median()
 
-# Tải dữ liệu Sentinel-2 bằng cách chia nhỏ khu vực
-print("  Đang tải dữ liệu Sentinel-2...")
+# Export dữ liệu Sentinel-2 vào Google Drive
+print("  Đang chuẩn bị export dữ liệu Sentinel-2...")
 bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'ndvi', 'evi', 'mndwi', 'ndbi']
-scale = 30  # Tăng độ phân giải lên 30m thay vì 10m để giảm kích thước
+scale = 100  # Sử dụng độ phân giải thấp hơn để giảm kích thước
 
-# Chia khu vực thành lưới nhỏ để tải
-def download_in_grid(image, region, output_file, scale=30, grid_size=2):
-    # Tính toán kích thước mỗi phần
-    region_info = region.getInfo()
-    coords = region_info['coordinates'][0]
-    
-    # Tính min/max lon/lat
-    lons = [p[0] for p in coords]
-    lats = [p[1] for p in coords]
-    min_lon, max_lon = min(lons), max(lons)
-    min_lat, max_lat = min(lats), max(lats)
-    
-    # Chia thành lưới grid_size x grid_size
-    lon_step = (max_lon - min_lon) / grid_size
-    lat_step = (max_lat - min_lat) / grid_size
-    
-    # Tạo các mảng numpy để lưu kết quả
-    arrays = []
-    
-    print(f"    Chia khu vực thành lưới {grid_size}x{grid_size}")
-    
-    # Xử lý từng phần nhỏ
-    for i in range(grid_size):
-        for j in range(grid_size):
-            cell_min_lon = min_lon + i * lon_step
-            cell_max_lon = min_lon + (i + 1) * lon_step
-            cell_min_lat = min_lat + j * lat_step
-            cell_max_lat = min_lat + (j + 1) * lat_step
-            
-            # Tạo geometry cho phần nhỏ
-            cell_geom = ee.Geometry.Rectangle([cell_min_lon, cell_min_lat, cell_max_lon, cell_max_lat])
-            
-            print(f"    Đang tải phần {i*grid_size + j + 1}/{grid_size*grid_size}...")
-            try:
-                # Lấy dữ liệu từ phần nhỏ
-                array = geemap.ee_to_numpy(
-                    image.clip(cell_geom),
-                    region=cell_geom,
-                    scale=scale
-                )
-                
-                arrays.append((array, i, j))
-                time.sleep(1)  # Đợi 1 giây để tránh quá tải API
-            except Exception as e:
-                print(f"    Lỗi khi tải phần {i*grid_size + j + 1}: {str(e)}")
-                # Nếu lỗi, thử tăng scale để giảm kích thước
-                try:
-                    print(f"    Thử lại với độ phân giải thấp hơn (scale={scale*2})...")
-                    array = geemap.ee_to_numpy(
-                        image.clip(cell_geom),
-                        region=cell_geom,
-                        scale=scale*2
-                    )
-                    arrays.append((array, i, j))
-                    time.sleep(1)
-                except Exception as e:
-                    print(f"    Không thể tải phần {i*grid_size + j + 1}: {str(e)}")
-    
-    # Gộp các mảng lại với nhau
-    if not arrays:
-        raise Exception("Không thể tải dữ liệu từ bất kỳ phần nào của lưới")
-    
-    # Sắp xếp các mảng theo vị trí i, j
-    arrays.sort(key=lambda x: (x[1], x[2]))
-    
-    # Gộp theo chiều ngang (cùng hàng)
-    rows = []
-    for i in range(grid_size):
-        row_arrays = [arr for arr, row, col in arrays if row == i]
-        if row_arrays:
-            rows.append(np.hstack(row_arrays))
-    
-    # Gộp theo chiều dọc
-    if rows:
-        final_array = np.vstack(rows)
-    else:
-        raise Exception("Không thể gộp các mảnh dữ liệu")
-    
-    # Lưu dưới dạng GeoTIFF
-    transform = from_origin(min_lon, max_lat, scale/111325, scale/111325)
-    
-    with rasterio.open(
-        output_file,
-        'w',
-        driver='GTiff',
-        height=final_array.shape[0],
-        width=final_array.shape[1],
-        count=1,
-        dtype=final_array.dtype,
-        crs='+proj=longlat +datum=WGS84 +no_defs',
-        transform=transform,
-    ) as dst:
-        dst.write(final_array, 1)
-    
-    print(f"      Đã lưu tại: {output_file}")
-    return final_array
-
-# Tải từng band
 for band in bands:
-    print(f"    Đang tải band {band}...")
+    print(f"    Đang export band {band}...")
     band_data = s2Composite.select(band)
     
-    output_file = os.path.join(data_dir, "sentinel", f"sentinel2_{band}.tif")
-    
-    try:
-        # Thử tải toàn bộ với độ phân giải thấp hơn
-        download_in_grid(
-            image=band_data,
-            region=geometry.geometry().bounds(),
-            output_file=output_file,
-            scale=scale,
-            grid_size=3  # Chia thành lưới 3x3 = 9 phần nhỏ
-        )
-    except Exception as e:
-        print(f"    Lỗi khi tải band {band}: {str(e)}")
-        print(f"    Thử lại với độ phân giải thấp hơn...")
-        try:
-            download_in_grid(
-                image=band_data,
-                region=geometry.geometry().bounds(),
-                output_file=output_file,
-                scale=scale*2,  # Giảm độ phân giải xuống một nửa
-                grid_size=4     # Chia thành lưới 4x4 = 16 phần nhỏ
-            )
-        except Exception as e:
-            print(f"    Không thể tải band {band}: {str(e)}")
+    # Export sang Google Drive
+    task = ee.batch.Export.image.toDrive(
+        image=band_data.clip(geometry),
+        description=f'sentinel2_{band}',
+        folder=folder_name,
+        region=geometry.geometry().bounds(),
+        scale=scale,
+        maxPixels=1e9
+    )
+    task.start()
+    print(f"    Đã bắt đầu export {band} vào Google Drive (theo dõi tại https://code.earthengine.google.com/tasks)")
 
-# 3. Tải dữ liệu DEM
+# 3. Export dữ liệu DEM
 print("\n[3/4] Đang xử lý dữ liệu DEM...")
 glo30 = ee.ImageCollection('COPERNICUS/DEM/GLO30')
 elevation = glo30.select('DEM').filterBounds(geometry).mosaic()
 slope = ee.Terrain.slope(elevation)
 
-# Tải DEM và Slope với cùng phương pháp chia lưới
-print("  Đang tải dữ liệu DEM...")
-output_dem = os.path.join(data_dir, "dem", "dem.tif")
-try:
-    download_in_grid(
-        image=elevation,
-        region=geometry.geometry().bounds(),
-        output_file=output_dem,
-        scale=90,  # DEM với độ phân giải 90m
-        grid_size=2
-    )
-except Exception as e:
-    print(f"  Lỗi khi tải DEM: {str(e)}")
+# Export DEM và Slope vào Google Drive
+print("  Đang export DEM...")
+task_dem = ee.batch.Export.image.toDrive(
+    image=elevation.clip(geometry),
+    description='dem',
+    folder=folder_name,
+    region=geometry.geometry().bounds(),
+    scale=100,
+    maxPixels=1e9
+)
+task_dem.start()
+print("  Đã bắt đầu export DEM vào Google Drive")
 
-print("  Đang tải dữ liệu Slope...")
-output_slope = os.path.join(data_dir, "dem", "slope.tif")
-try:
-    download_in_grid(
-        image=slope,
-        region=geometry.geometry().bounds(),
-        output_file=output_slope,
-        scale=90,  # Slope với độ phân giải 90m
-        grid_size=2
-    )
-except Exception as e:
-    print(f"  Lỗi khi tải Slope: {str(e)}")
+print("  Đang export Slope...")
+task_slope = ee.batch.Export.image.toDrive(
+    image=slope.clip(geometry),
+    description='slope',
+    folder=folder_name,
+    region=geometry.geometry().bounds(),
+    scale=100,
+    maxPixels=1e9
+)
+task_slope.start()
+print("  Đã bắt đầu export Slope vào Google Drive")
 
-# 4. Tải dữ liệu GEDI
+# 4. Export dữ liệu GEDI
 print("\n[4/4] Đang xử lý dữ liệu GEDI...")
 gedi = ee.ImageCollection("LARSE/GEDI/GEDI04_A_002_MONTHLY")
 gediFiltered = gedi.filter(ee.Filter.date(start_date, end_date)).filter(ee.Filter.bounds(geometry))
@@ -291,31 +139,41 @@ def errorMask(image):
 gediProcessed = gediFiltered.map(qualityMask).map(errorMask)
 gediMosaic = gediProcessed.mosaic().select('agbd')
 
-# Tải GEDI với độ phân giải thấp (phù hợp với dữ liệu GEDI)
-print("  Đang tải dữ liệu GEDI...")
-output_gedi = os.path.join(data_dir, "gedi", "gedi_agbd.tif")
-try:
-    download_in_grid(
-        image=gediMosaic,
-        region=geometry.geometry().bounds(),
-        output_file=output_gedi,
-        scale=500,  # GEDI có độ phân giải thấp hơn ~500m
-        grid_size=1  # Không cần chia nhỏ vì GEDI đã có độ phân giải thấp
-    )
-except Exception as e:
-    print(f"  Lỗi khi tải GEDI: {str(e)}")
-    print("  Thử lại với độ phân giải thấp hơn...")
-    try:
-        download_in_grid(
-            image=gediMosaic,
-            region=geometry.geometry().bounds(),
-            output_file=output_gedi,
-            scale=1000,  # Giảm độ phân giải xuống 1km
-            grid_size=1
-        )
-    except Exception as e:
-        print(f"  Không thể tải GEDI: {str(e)}")
+# Export GEDI vào Google Drive
+print("  Đang export GEDI...")
+task_gedi = ee.batch.Export.image.toDrive(
+    image=gediMosaic.clip(geometry),
+    description='gedi_agbd',
+    folder=folder_name,
+    region=geometry.geometry().bounds(),
+    scale=500,  # GEDI có độ phân giải thấp
+    maxPixels=1e9
+)
+task_gedi.start()
+print("  Đã bắt đầu export GEDI vào Google Drive")
 
-print("\n=== HOÀN TẤT TẢI DỮ LIỆU ===")
-print(f"Tất cả dữ liệu đã được lưu tại: {data_dir}")
-print("Dữ liệu đã sẵn sàng để sử dụng với script local.py")
+print("\n=== HOÀN TẤT CHUẨN BỊ EXPORT TASKS ===")
+print(f"Tất cả dữ liệu đang được export vào Google Drive, thư mục: {folder_name}")
+print("Bạn có thể theo dõi tiến trình export tại: https://code.earthengine.google.com/tasks")
+print("Sau khi tất cả các task hoàn thành, hãy tải dữ liệu từ Google Drive về thư mục Data")
+print("Lưu ý: Quá trình export có thể mất 10-30 phút tùy thuộc vào kích thước dữ liệu và tải của server GEE")
+
+# Kiểm tra trạng thái các task
+print("\nĐang kiểm tra trạng thái các task export (sẽ kiểm tra trong 60 giây)...")
+tasks = [task, task_dem, task_slope, task_gedi]
+task_names = ['Sentinel-2', 'DEM', 'Slope', 'GEDI']
+
+# Kiểm tra trong 60 giây
+for i in range(6):
+    print(f"\nLần kiểm tra {i+1}/6 (sau {i*10} giây):")
+    for j, task in enumerate(tasks):
+        status = task.status()
+        state = status.get('state', 'UNKNOWN')
+        print(f"  - {task_names[j]}: {state}")
+    
+    if i < 5:  # Không cần sleep ở lần cuối
+        time.sleep(10)  # Chờ 10 giây
+
+print("\nQuá trình kiểm tra kết thúc. Các task sẽ tiếp tục chạy trên máy chủ GEE.")
+print("Vui lòng truy cập https://code.earthengine.google.com/tasks để xem trạng thái chi tiết.")
+print("Sau khi tất cả task hoàn thành, hãy tải xuống dữ liệu từ Google Drive vào thư mục Data.")
